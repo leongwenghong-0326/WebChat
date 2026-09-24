@@ -424,8 +424,13 @@ function time_ago(?string $dt): string
         return 'never';
     }
     try {
-        $then = new DateTimeImmutable($dt);
-        $diff = (new DateTimeImmutable('now'))->getTimestamp() - $then->getTimestamp();
+        // MySQL DATETIME has no TZ — treat as app local time (Asia/Kuala_Lumpur)
+        $tz = new DateTimeZone(date_default_timezone_get() ?: 'Asia/Kuala_Lumpur');
+        $then = new DateTimeImmutable($dt, $tz);
+        $diff = (new DateTimeImmutable('now', $tz))->getTimestamp() - $then->getTimestamp();
+        if ($diff < 0) {
+            $diff = 0;
+        }
         if ($diff < 60) {
             return 'just now';
         }
@@ -554,8 +559,20 @@ function public_user(array $user): array
     $presence = $user['presence'] ?? 'offline';
     $lastActivity = $user['last_activity_at'] ?? null;
     if ($lastActivity) {
-        $age = time() - strtotime($lastActivity);
-        if ($age > PRESENCE_ONLINE_SECONDS && $presence === 'online') {
+        $tz = new DateTimeZone(date_default_timezone_get() ?: 'Asia/Kuala_Lumpur');
+        try {
+            $then = new DateTimeImmutable($lastActivity, $tz);
+            $age = (new DateTimeImmutable('now', $tz))->getTimestamp() - $then->getTimestamp();
+        } catch (Exception) {
+            $age = time() - strtotime($lastActivity);
+        }
+        if ($age < 0) {
+            $age = 0;
+        }
+        // Recent activity => online (fixes cPanel TZ drift flipping everyone offline)
+        if ($age <= PRESENCE_ONLINE_SECONDS) {
+            $presence = 'online';
+        } elseif ($presence === 'online') {
             $presence = 'offline';
         }
     }

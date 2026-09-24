@@ -153,8 +153,8 @@
 
     function toastCallError(err, fallback, opts) {
         opts = opts || {};
-        // Group calls: never spam "camera/microphone not found" toasts
-        if (opts.group && isDeviceMissingError(err)) {
+        // Never toast missing camera/mic — call can continue receive-only / silent
+        if (isDeviceMissingError(err) || opts.quietDevice) {
             return;
         }
         toastMediaOnce(mediaErrorMessage(err, fallback), "error");
@@ -1436,7 +1436,10 @@
             return;
         }
         try {
-            localStream = await getMedia(type);
+            localStream = await getMedia(type, { allowSilent: true, quiet: true });
+            if (!localStream || !localStream.getTracks().length) {
+                localStream = createSilentAudioStream();
+            }
             createPeer(type === "video");
             await addLocalTracks(localStream);
 
@@ -1488,16 +1491,18 @@
                 localStream = await getMedia(call.call_type, {
                     group: !!call.group_id,
                     call: call,
-                    allowSilent: !!call.group_id
+                    allowSilent: true,
+                    quiet: true
                 });
             } else if (call.call_type === "video" && localStream.getVideoTracks().length === 0) {
-                // Upgrade preview audio-only to video if possible (quiet for group)
+                // Upgrade preview audio-only to video if possible
                 try {
                     var upgraded = await getMedia("video", {
                         group: !!call.group_id,
                         call: call,
-                        quiet: !!call.group_id,
-                        allowSilent: !!call.group_id
+                        quiet: true,
+                        allowSilent: true,
+                        silentFallback: true
                     });
                     if (upgraded && upgraded !== localStream) {
                         localStream.getTracks().forEach(function (t) { t.stop(); });
@@ -1506,11 +1511,7 @@
                 } catch (e) {}
             }
             if (!localStream || !localStream.getTracks().length) {
-                if (call.group_id) {
-                    localStream = createSilentAudioStream();
-                } else {
-                    throw new Error("Microphone required for calls.");
-                }
+                localStream = createSilentAudioStream();
             }
 
             createPeer(call.call_type === "video");

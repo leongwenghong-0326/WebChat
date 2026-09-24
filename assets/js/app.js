@@ -33,9 +33,12 @@
         type = type || 'info';
         duration = duration == null ? 4500 : duration;
         message = String(message == null ? '' : message);
-        // Never show raw getUserMedia device errors in the UI
-        if (/requested device not found/i.test(message) || message === 'NotFoundError') {
-            message = 'Camera or microphone not found.';
+        // Never spam device errors — chatting does not need a camera
+        if (/requested device not found/i.test(message) ||
+            /camera or microphone not found/i.test(message) ||
+            /microphone\/camera permission denied/i.test(message) ||
+            message === 'NotFoundError') {
+            return null;
         }
 
         // Dedupe identical toasts (stops stacked "device not found" spam)

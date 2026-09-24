@@ -1,5 +1,6 @@
 # Local secrets / environment overrides
 includes/config.local.php
+includes/config.local.cpanel.php
 .env
 .env.*
 !.env.example

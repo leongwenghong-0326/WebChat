@@ -29,6 +29,8 @@ final class Database
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES => false,
             ]);
+            // Match PHP timezone so NOW() / last_seen / presence are consistent on cPanel
+            self::$pdo->exec("SET time_zone = '+08:00'");
         } catch (PDOException $e) {
             app_log('Database connection failed: ' . $e->getMessage());
             throw new RuntimeException('Unable to connect to the database.');

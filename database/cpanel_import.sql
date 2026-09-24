@@ -1,3 +1,7 @@
+-- WebConnect cPanel import
+-- Database: synergy1_leongwenghong_webchat
+-- In phpMyAdmin: select this database first, then Import this file
+-- (Or run as-is; USE statement is included)
 -- WebConnect Database Schema
 -- utf8mb4 / utf8mb4_unicode_ci
 -- Import into a fresh MySQL/MariaDB database
@@ -6,11 +10,7 @@ SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 SET SQL_MODE = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION';
 
-CREATE DATABASE IF NOT EXISTS `webconnect`
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-USE `webconnect`;
+USE `synergy1_leongwenghong_webchat`;
 
 DROP TABLE IF EXISTS `rate_limits`;
 DROP TABLE IF EXISTS `reports`;

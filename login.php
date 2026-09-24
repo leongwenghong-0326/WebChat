@@ -39,15 +39,15 @@ $disabled = isset($_GET['error']) && $_GET['error'] === 'disabled';
             <div class="d-grid gap-2 mb-3">
                 <button type="button" class="btn btn-outline-secondary btn-sm" id="btnFillDemoUser"
                         data-login="Lwh_0326" data-password="Hong0326"
-                        title="Click to autofill username">
+                        title="Click to autofill username and password">
                     <i class="fa-solid fa-key"></i>
-                    Use username: <code>Lwh_0326</code>
+                    Use <code>Lwh_0326</code> / <code>Hong0326</code>
                 </button>
                 <button type="button" class="btn btn-outline-secondary btn-sm" id="btnFillDemoEmail"
                         data-login="leongwenghong5@gmail.com" data-password="Hong0326"
-                        title="Click to autofill email">
+                        title="Click to autofill email and password">
                     <i class="fa-solid fa-envelope"></i>
-                    Use email: <code>leongwenghong5@gmail.com</code>
+                    Use <code>leongwenghong5@gmail.com</code> / <code>Hong0326</code>
                 </button>
             </div>
             <div id="loginAlert" class="alert alert-danger py-2 d-none" role="alert"></div>
