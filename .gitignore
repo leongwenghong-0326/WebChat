@@ -1,0 +1,49 @@
+# Local secrets / environment overrides
+includes/config.local.php
+.env
+.env.*
+!.env.example
+
+# Logs and error dumps
+logs/
+*.log
+_mysql_err.txt
+*.err.txt
+
+# User uploads (keep folder placeholders if present)
+uploads/avatars/*
+uploads/images/*
+uploads/files/*
+uploads/voice/*
+uploads/groups/*
+!uploads/**/.gitkeep
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Composer / Node (if added later)
+/vendor/
+/node_modules/
+composer.lock
+package-lock.json
+tools/screenshot/node_modules/
+tools/screenshot/package-lock.json
+
+# Install leftovers / backups
+*.bak
+*.old
+*.tmp
+*.temp
+installed.lock
+config/installed.lock
+
+# Local test artifacts
+.phpunit.result.cache
+coverage/
