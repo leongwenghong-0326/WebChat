@@ -593,12 +593,17 @@ function rtc_config(): array
         $ice[] = ['urls' => $url];
     }
     if (!empty(RTC_TURN_URLS)) {
-        $turn = ['urls' => RTC_TURN_URLS];
-        if (RTC_TURN_USERNAME !== '') {
-            $turn['username'] = RTC_TURN_USERNAME;
-            $turn['credential'] = RTC_TURN_CREDENTIAL;
+        foreach (RTC_TURN_URLS as $turnUrl) {
+            $turn = ['urls' => $turnUrl];
+            if (RTC_TURN_USERNAME !== '') {
+                $turn['username'] = RTC_TURN_USERNAME;
+                $turn['credential'] = RTC_TURN_CREDENTIAL;
+            }
+            $ice[] = $turn;
         }
-        $ice[] = $turn;
     }
-    return ['iceServers' => $ice];
+    return [
+        'iceServers' => $ice,
+        'iceCandidatePoolSize' => 4,
+    ];
 }

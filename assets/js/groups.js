@@ -78,6 +78,7 @@
         myRole: null,
         members: [],
         messages: [],
+        messagesFp: '',
         lastMessageId: 0,
         replyTo: null,
         pollTimer: null,
@@ -293,8 +294,8 @@
             WC.toast('Calling module failed to load. Refresh the page.', 'error');
             return;
         }
-        Promise.resolve(WC.Calls.startMulti(ids, type, state.groupId)).catch(function (e) {
-            WC.toast((e && e.message) ? e.message : 'Unable to start call.', 'error');
+        Promise.resolve(WC.Calls.startMulti(ids, type, state.groupId)).catch(function () {
+            /* calls.js already toasts group media errors once */
         });
     }
 
@@ -376,14 +377,42 @@
             '</div></div>';
     }
 
-    function renderMessages() {
+    function messageFingerprint(msg) {
+        if (!msg) return '';
+        var reactions = (msg.reactions || []).map(function (r) {
+            return String(r.emoji || '') + ':' + String(r.count || 0) + ':' + (r.reacted ? '1' : '0');
+        }).join(',');
+        return [
+            msg.id || msg._tempId || '',
+            msg.is_deleted ? '1' : '0',
+            msg.delivery_status || '',
+            msg.message_type || '',
+            msg.body || '',
+            msg.media_url || '',
+            msg.reply_to_id || '',
+            reactions,
+            (msg.sender && msg.sender.username) || ''
+        ].join('|');
+    }
+
+    function messagesFingerprint(list) {
+        return (list || []).map(messageFingerprint).join('||');
+    }
+
+    function renderMessages(opts) {
+        opts = opts || {};
         if (!els.messages) return;
         if (!state.messages.length) {
             els.messages.innerHTML = '<div class="wc-chat-empty"><p class="mb-0">No messages yet. Say hello!</p></div>';
+            state.messagesFp = '';
             return;
         }
+        var nearBottom = (els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight) < 100;
         els.messages.innerHTML = state.messages.map(messageHtml).join('');
-        els.messages.scrollTop = els.messages.scrollHeight;
+        state.messagesFp = messagesFingerprint(state.messages);
+        if (opts.forceScroll || nearBottom) {
+            els.messages.scrollTop = els.messages.scrollHeight;
+        }
         syncReplyUi();
     }
 
@@ -397,7 +426,7 @@
         else state.messages.push(msg);
         state.messages.sort(function (a, b) { return (a.id || 0) - (b.id || 0); });
         if (msg.id && msg.id > state.lastMessageId) state.lastMessageId = msg.id;
-        renderMessages();
+        renderMessages({ forceScroll: true });
     }
 
     function syncReplyUi(opts) {
@@ -553,9 +582,8 @@
     async function loadMessages(initial) {
         // Always fetch latest window so deletes and read ticks stay synced.
         var query = { group_id: state.groupId, limit: 80 };
-            var res = await WC.api('groups.php?action=messages', { method: 'GET', query: query });
-            var messages = (res.data && res.data.messages) || [];
-        var prevLast = state.lastMessageId;
+        var res = await WC.api('groups.php?action=messages', { method: 'GET', query: query });
+        var messages = (res.data && res.data.messages) || [];
         var byId = {};
         state.messages.forEach(function (m) { byId[m.id] = m; });
 
@@ -569,28 +597,21 @@
             if (m.id > state.lastMessageId) state.lastMessageId = m.id;
         });
 
-        // Keep any optimistic temps; rebuild from server window + older local outside window
-        var windowIds = {};
-        messages.forEach(function (m) { windowIds[m.id] = true; });
         var merged = Object.keys(byId).map(function (k) { return byId[k]; });
         merged.sort(function (a, b) { return (a.id || 0) - (b.id || 0); });
         state.messages = merged;
 
-        var needRender = initial || state.lastMessageId > prevLast;
-        if (!needRender) {
-            // Still re-render if a delete/read status changed in the window
-            needRender = messages.some(function (m) {
-                var old = state.messages.find(function (x) { return x.id === m.id; });
-                return old && (old.is_deleted !== m.is_deleted || old.delivery_status !== m.delivery_status);
-            });
+        var nextFp = messagesFingerprint(state.messages);
+        if (initial || nextFp !== state.messagesFp) {
+            renderMessages({ forceScroll: !!initial });
         }
-        // Simpler: always render after merge (group chat volume is small)
-        renderMessages();
-        applyReceipts((res.data && res.data.receipts) || []);
+        if (applyReceipts((res.data && res.data.receipts) || [])) {
+            state.messagesFp = messagesFingerprint(state.messages);
+        }
 
-            if (initial) {
-                await WC.api('groups.php?action=mark_read', {
-                    method: 'POST',
+        if (initial) {
+            await WC.api('groups.php?action=mark_read', {
+                method: 'POST',
                 body: { group_id: state.groupId }
             }).catch(function () {});
         }
@@ -1071,8 +1092,8 @@
             WC.toast('Multi-member calling is unavailable. Refresh the page.', 'error');
             return;
         }
-        Promise.resolve(starter).catch(function (e) {
-            WC.toast((e && e.message) ? e.message : 'Unable to start call.', 'error');
+        Promise.resolve(starter).catch(function () {
+            /* calls.js already toasts group media errors once */
         });
     }
 

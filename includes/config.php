@@ -73,9 +73,14 @@ if (!defined('RTC_STUN_URLS')) define('RTC_STUN_URLS', [
     'stun:stun1.l.google.com:19302',
 ]);
 
-if (!defined('RTC_TURN_URLS')) define('RTC_TURN_URLS', []);
-if (!defined('RTC_TURN_USERNAME')) define('RTC_TURN_USERNAME', '');
-if (!defined('RTC_TURN_CREDENTIAL')) define('RTC_TURN_CREDENTIAL', '');
+// Free public TURN (helps Cloudflare / mobile NAT). Override in config.local.php if needed.
+if (!defined('RTC_TURN_URLS')) define('RTC_TURN_URLS', [
+    'turn:openrelay.metered.ca:80',
+    'turn:openrelay.metered.ca:443',
+    'turn:openrelay.metered.ca:443?transport=tcp',
+]);
+if (!defined('RTC_TURN_USERNAME')) define('RTC_TURN_USERNAME', 'openrelayproject');
+if (!defined('RTC_TURN_CREDENTIAL')) define('RTC_TURN_CREDENTIAL', 'openrelayproject');
 
 if (!defined('LOG_PATH')) define('LOG_PATH', APP_PATH . '/logs/app.log');
 if (!defined('DISPLAY_ERRORS')) define('DISPLAY_ERRORS', true);

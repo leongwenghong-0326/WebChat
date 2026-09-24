@@ -872,11 +872,22 @@ body.wc-app {
 .wc-msg-actions {
     display: flex;
     gap: 0.15rem;
-    opacity: 0;
+    opacity: 0.65;
     transition: opacity 0.15s ease;
 }
 
-.wc-msg:hover .wc-msg-actions { opacity: 1; }
+/* Desktop only: hide until hover — avoids flash on touch / poll re-render */
+@media (hover: hover) and (pointer: fine) {
+    .wc-msg-actions { opacity: 0; }
+    .wc-msg:hover .wc-msg-actions,
+    .wc-msg:focus-within .wc-msg-actions {
+        opacity: 1;
+    }
+}
+
+.wc-msg.is-actions-open .wc-msg-actions {
+    opacity: 1;
+}
 
 .wc-msg-action-btn {
     border: none;
@@ -1620,6 +1631,15 @@ body.wc-app {
     height: 100%;
     object-fit: cover;
     background: #000;
+    transform-origin: center center;
+}
+.wc-call-video-tile video.is-mirrored,
+video#localVideo.is-mirrored {
+    transform: scaleX(-1);
+}
+.wc-call-video-tile.is-speaking {
+    box-shadow: inset 0 0 0 3px #2dd4bf, 0 0 18px rgba(45, 212, 191, 0.45);
+    z-index: 2;
 }
 .wc-call-video-tile .wc-call-tile-label {
     position: absolute;
@@ -1966,6 +1986,25 @@ body.wc-app {
         height: 75px;
         bottom: 90px;
         right: 1rem;
+    }
+
+    .wc-call-video-grid {
+        gap: 3px;
+        padding: 3px;
+    }
+    .wc-call-video-tile {
+        border-radius: 8px;
+        min-height: 28vh;
+    }
+    .wc-call-video-grid.tiles-3 .wc-call-video-tile:nth-child(3) {
+        min-height: 36vh;
+    }
+    .wc-call-avatars.is-multi .wc-call-avatar {
+        width: 64px;
+        height: 64px;
+    }
+    .wc-call-avatars .wc-call-avatar.is-speaking {
+        transform: scale(1.22);
     }
 
     .wc-forum-grid { grid-template-columns: 1fr; }
@@ -2439,12 +2478,25 @@ button.wc-call-log:hover .wc-call-log-title {
     object-fit: cover;
     border: 3px solid rgba(255, 255, 255, 0.3);
     background: rgba(255,255,255,0.08);
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .wc-call-avatars.is-multi img,
 .wc-call-avatars.is-multi .wc-call-avatar {
     width: 72px;
     height: 72px;
+}
+
+.wc-call-avatars .wc-call-avatar.is-speaking {
+    border-color: #2dd4bf;
+    box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.35), 0 0 22px rgba(45, 212, 191, 0.55);
+    transform: scale(1.18);
+    z-index: 2;
+}
+
+.wc-call-avatars.has-active-speaker .wc-call-avatar:not(.is-speaking) {
+    opacity: 0.72;
+    transform: scale(0.92);
 }
 
 .wc-call-avatars .wc-call-more {

@@ -35,6 +35,130 @@
     var videoMixRaf = null;
     var videoMixStream = null;
     var videoMixSources = [];
+    var mediaAcquirePromise = null;
+    var mediaToastSeen = {};
+    var startingMulti = false;
+    var speakerCtx = null;
+    var speakerAnalysers = {};
+    var speakerTimer = null;
+    var activeSpeakerKey = null;
+
+    function isPhoneDevice() {
+        var ua = navigator.userAgent || "";
+        return /iPhone|iPad|iPod|Android.+Mobile/i.test(ua);
+    }
+
+    function isIOSDevice() {
+        var ua = navigator.userAgent || "";
+        return /iPhone|iPad|iPod/i.test(ua) ||
+            (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    }
+
+    function canUseHostVideoMix() {
+        if (!multiMode || !isCaller || callType !== "video") return false;
+        // Canvas captureStream on iOS/Android is often black, blurry, or stuck
+        if (isPhoneDevice() || isIOSDevice()) return false;
+        return !!(HTMLCanvasElement && HTMLCanvasElement.prototype.captureStream);
+    }
+
+    function prepVideoEl(videoEl, opts) {
+        if (!videoEl) return;
+        opts = opts || {};
+        videoEl.autoplay = true;
+        videoEl.muted = opts.muted !== false;
+        videoEl.playsInline = true;
+        videoEl.setAttribute("playsinline", "true");
+        videoEl.setAttribute("webkit-playsinline", "true");
+        if (opts.mirror) videoEl.classList.add("is-mirrored");
+        else videoEl.classList.remove("is-mirrored");
+        var play = function () {
+            var p = videoEl.play();
+            if (p && typeof p.catch === "function") p.catch(function () {});
+        };
+        videoEl.onloadedmetadata = play;
+        play();
+    }
+
+    function isGroupCallContext(opts) {
+        opts = opts || {};
+        return !!(opts.group || multiMode || activeGroupId || startingMulti ||
+            (pendingCall && pendingCall.group_id) ||
+            (opts.call && opts.call.group_id));
+    }
+
+    /** One toast per message; device errors stay suppressed across retries (~45s). */
+    function toastMediaOnce(message, type) {
+        if (!WC.toast || !message) return;
+        message = sanitizeMediaToast(message);
+        // Never surface the raw browser string
+        if (/requested device not found/i.test(message)) {
+            message = "Camera or microphone not found.";
+        }
+        var key = String(type || "info") + "::" + String(message);
+        var now = Date.now();
+        if (mediaToastSeen[key] && (now - mediaToastSeen[key]) < 45000) return;
+        mediaToastSeen[key] = now;
+        WC.toast(message, type || "warning");
+    }
+
+    function sanitizeMediaToast(message) {
+        message = String(message || "");
+        if (/requested device not found/i.test(message) || message === "NotFoundError") {
+            return "Camera or microphone not found.";
+        }
+        if (/permission|notallowed|denied/i.test(message)) {
+            return "Microphone/camera permission denied.";
+        }
+        if (/notreadable|trackstart|could not start/i.test(message)) {
+            return "Camera/microphone is busy in another app.";
+        }
+        return message;
+    }
+
+    function friendlyMediaError(err) {
+        var name = (err && err.name) ? String(err.name) : "";
+        var msg = (err && err.message) ? String(err.message) : "";
+        if (name === "NotFoundError" || /requested device not found/i.test(msg)) {
+            return "Camera or microphone not found.";
+        }
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+            return "Microphone/camera permission denied.";
+        }
+        if (name === "NotReadableError" || name === "TrackStartError") {
+            return "Camera/microphone is busy in another app.";
+        }
+        return sanitizeMediaToast(msg || "Unable to access camera/microphone.");
+    }
+
+    function mediaErrorMessage(err, fallback) {
+        if (!err) return fallback || "Unable to access camera/microphone.";
+        if (err._wcFriendly) return err._wcFriendly;
+        return friendlyMediaError(err) || fallback || "Unable to start call.";
+    }
+
+    function isDeviceMissingError(err) {
+        var name = (err && err.name) ? String(err.name) : "";
+        var msg = mediaErrorMessage(err, "");
+        return name === "NotFoundError" || /not found/i.test(msg);
+    }
+
+    function throwMediaError(err) {
+        var friendly = friendlyMediaError(err);
+        var wrapped = new Error(friendly);
+        wrapped.name = (err && err.name) || "MediaError";
+        wrapped._wcFriendly = friendly;
+        wrapped._wcMedia = true;
+        throw wrapped;
+    }
+
+    function toastCallError(err, fallback, opts) {
+        opts = opts || {};
+        // Group calls: never spam "camera/microphone not found" toasts
+        if (opts.group && isDeviceMissingError(err)) {
+            return;
+        }
+        toastMediaOnce(mediaErrorMessage(err, fallback), "error");
+    }
 
     // ---- Ringtone (Web Audio) ----
     var ringCtx = null;
@@ -198,8 +322,19 @@
             var img = document.createElement("img");
             if (i === 0) img.id = "callAvatar";
             img.className = "wc-call-avatar";
-            img.alt = "";
+            img.alt = peer.username || "";
             img.src = (peer && peer.avatar) || fallback || "";
+            var uid = peer.id || peer.user_id || peer.userId || "";
+            var speakerKey = uid ? ("user-" + uid) : ("peer-" + i);
+            if (peer._speakerKey) speakerKey = peer._speakerKey;
+            if (peer.isSelf || (uid && parseInt(uid, 10) === parseInt(WC.userId, 10))) {
+                speakerKey = "local";
+            }
+            img.setAttribute("data-speaker-key", speakerKey);
+            img.setAttribute("data-username", peer.username || "");
+            if (activeSpeakerKey && activeSpeakerKey === speakerKey) {
+                img.classList.add("is-speaking");
+            }
             stack.appendChild(img);
         }
         if (peers.length > 3) {
@@ -209,6 +344,147 @@
             stack.appendChild(more);
         }
         callAvatar = WC.$("#callAvatar");
+        applySpeakerUi(activeSpeakerKey);
+    }
+
+    function stopSpeakerDetect() {
+        if (speakerTimer) {
+            clearInterval(speakerTimer);
+            speakerTimer = null;
+        }
+        Object.keys(speakerAnalysers).forEach(function (key) {
+            try { speakerAnalysers[key].source.disconnect(); } catch (e) {}
+        });
+        speakerAnalysers = {};
+        activeSpeakerKey = null;
+        applySpeakerUi(null);
+        try {
+            if (speakerCtx) speakerCtx.close();
+        } catch (e) {}
+        speakerCtx = null;
+    }
+
+    function ensureSpeakerCtx() {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        if (!speakerCtx || speakerCtx.state === "closed") {
+            speakerCtx = new AC();
+        }
+        if (speakerCtx.state === "suspended") {
+            speakerCtx.resume().catch(function () {});
+        }
+        return speakerCtx;
+    }
+
+    function bindSpeakerStream(key, stream) {
+        if (!key || !stream) return;
+        var tracks = stream.getAudioTracks().filter(function (t) {
+            return t && t.readyState !== "ended";
+        });
+        if (!tracks.length) return;
+        var ctx = ensureSpeakerCtx();
+        if (!ctx) return;
+        try {
+            if (speakerAnalysers[key]) {
+                try { speakerAnalysers[key].source.disconnect(); } catch (e) {}
+                delete speakerAnalysers[key];
+            }
+            var source = ctx.createMediaStreamSource(new MediaStream([tracks[0]]));
+            var analyser = ctx.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.45;
+            source.connect(analyser);
+            speakerAnalysers[key] = {
+                analyser: analyser,
+                source: source,
+                data: new Uint8Array(analyser.frequencyBinCount),
+                key: key
+            };
+            startSpeakerDetect();
+        } catch (e) {}
+    }
+
+    function refreshSpeakerBindings() {
+        if (localStream) bindSpeakerStream("local", localStream);
+        if (multiMode) {
+            Object.keys(multiLegs).forEach(function (id) {
+                var leg = multiLegs[id];
+                if (!leg || leg.ended || !leg.connected || !leg.remoteStream) return;
+                var key = leg.userId ? ("user-" + leg.userId) : ("leg-" + id);
+                bindSpeakerStream(key, leg.remoteStream);
+            });
+        } else if (remoteStream) {
+            bindSpeakerStream("remote", remoteStream);
+        }
+    }
+
+    function startSpeakerDetect() {
+        if (speakerTimer) return;
+        speakerTimer = setInterval(tickSpeaker, 140);
+    }
+
+    function tickSpeaker() {
+        var bestKey = null;
+        var bestLevel = 0;
+        Object.keys(speakerAnalysers).forEach(function (key) {
+            var item = speakerAnalysers[key];
+            if (!item || !item.analyser) return;
+            item.analyser.getByteFrequencyData(item.data);
+            var sum = 0;
+            for (var i = 0; i < item.data.length; i++) sum += item.data[i];
+            var avg = sum / item.data.length;
+            if (key === "local" && muted) avg = 0;
+            if (avg > bestLevel) {
+                bestLevel = avg;
+                bestKey = key;
+            }
+        });
+        if (bestLevel < 16) bestKey = null;
+        if (bestKey === activeSpeakerKey) return;
+        activeSpeakerKey = bestKey;
+        applySpeakerUi(bestKey);
+    }
+
+    function applySpeakerUi(key) {
+        var stack = WC.$("#callAvatarStack");
+        if (stack) {
+            Array.prototype.slice.call(stack.querySelectorAll(".wc-call-avatar")).forEach(function (img) {
+                var match = !!(key && img.getAttribute("data-speaker-key") === key);
+                img.classList.toggle("is-speaking", match);
+            });
+            // Soft focus: enlarge speaking avatar order visually via class on stack
+            stack.classList.toggle("has-active-speaker", !!key);
+        }
+        var grid = WC.$("#callVideoGrid");
+        if (grid) {
+            Array.prototype.slice.call(grid.querySelectorAll("[data-tile]")).forEach(function (tile) {
+                var tileKey = tile.getAttribute("data-tile");
+                var speakerKey = tile.getAttribute("data-speaker-key") || tileKey;
+                // Map leg-X tile to user-Y when possible
+                if (tileKey && tileKey.indexOf("leg-") === 0) {
+                    var legId = tileKey.slice(4);
+                    var leg = multiLegs[legId];
+                    if (leg && leg.userId) speakerKey = "user-" + leg.userId;
+                }
+                if (tileKey === "local") speakerKey = "local";
+                tile.classList.toggle("is-speaking", !!(key && (speakerKey === key || tileKey === key)));
+            });
+        }
+        if (key) {
+            var speakingName = "";
+            if (key === "local") speakingName = WC.userName || "You";
+            else if (stack) {
+                var speakingImg = stack.querySelector('.wc-call-avatar[data-speaker-key="' + key + '"]');
+                if (speakingImg) speakingName = speakingImg.getAttribute("data-username") || "";
+            }
+            if (!speakingName && grid) {
+                var speakingTile = grid.querySelector('.wc-call-video-tile.is-speaking .wc-call-tile-label');
+                if (speakingTile) speakingName = speakingTile.textContent || "";
+            }
+            if (speakingName) {
+                setMetaLine(speakingName + " is talking");
+            }
+        }
     }
 
     function countActiveCameras() {
@@ -292,9 +568,11 @@
             if (callAvatar && callAvatar.src) {
                 renderParticipantAvatars([{
                     username: peerNameEl ? peerNameEl.textContent : "User",
-                    avatar: callAvatar.src
+                    avatar: callAvatar.src,
+                    _speakerKey: "remote"
                 }]);
             }
+            refreshSpeakerBindings();
         }
         var cams = countActiveCameras();
         var line = people + " connected";
@@ -445,7 +723,13 @@
         }
         if (videoArea) videoArea.classList.remove("is-multi-grid");
         if (remoteVideo) remoteVideo.classList.remove("d-none");
-        if (localVideo) localVideo.classList.remove("d-none");
+        if (localVideo) {
+            localVideo.classList.remove("d-none");
+            // Restore PiP preview when leaving grid mode
+            if (localStream && !localVideo.srcObject) {
+                showLocalPreview(localStream);
+            }
+        }
     }
 
     function stopHostVideoMix() {
@@ -465,7 +749,7 @@
     }
 
     function drawHostVideoMixFrame() {
-        if (!videoMixCanvas || !videoMixCtx || !multiMode || !isCaller || callType !== "video") {
+        if (!canUseHostVideoMix() || !videoMixCanvas || !videoMixCtx) {
             videoMixRaf = null;
             return;
         }
@@ -506,8 +790,25 @@
     }
 
     function rebuildHostVideoMix() {
-        if (!multiMode || !isCaller || callType !== "video") {
+        if (!canUseHostVideoMix()) {
             stopHostVideoMix();
+            // Ensure each leg still sends the real local camera track on phones
+            if (multiMode && isCaller && callType === "video" && localStream) {
+                var localVid = localStream.getVideoTracks().find(function (tr) {
+                    return tr.readyState !== "ended";
+                });
+                if (localVid) {
+                    Object.keys(multiLegs).forEach(function (id) {
+                        var leg = multiLegs[id];
+                        if (!leg || !leg.pc || leg.ended) return;
+                        leg.pc.getSenders().forEach(function (sender) {
+                            if (sender.track && sender.track.kind === "video" && sender.track !== localVid) {
+                                sender.replaceTrack(localVid).catch(function () {});
+                            }
+                        });
+                    });
+                }
+            }
             return;
         }
         var legs = [];
@@ -572,17 +873,25 @@
             tiles.push({
                 key: "leg-" + id,
                 legId: id,
+                speakerKey: leg.userId ? ("user-" + leg.userId) : ("leg-" + id),
                 stream: leg.remoteStream,
                 label: (leg.peer && leg.peer.username) || "Member",
-                muted: true
+                muted: true,
+                mirror: false
             });
         });
-        tiles.push({
-            key: "local",
-            stream: localStream,
-            label: WC.userName || "You",
-            muted: true
-        });
+        if (localStream && localStream.getVideoTracks().some(function (tr) {
+            return tr.readyState !== "ended" && tr.enabled !== false;
+        })) {
+            tiles.push({
+                key: "local",
+                speakerKey: "local",
+                stream: localStream,
+                label: WC.userName || "You",
+                muted: true,
+                mirror: true
+            });
+        }
 
         if (tiles.length <= 1) {
             // Still ringing / waiting — keep classic layout
@@ -591,8 +900,12 @@
         }
 
         videoArea.classList.add("is-multi-grid");
+        // Safari cannot play the same stream on PiP + grid tile — release PiP
+        if (localVideo) {
+            localVideo.classList.add("d-none");
+            localVideo.srcObject = null;
+        }
         if (remoteVideo) remoteVideo.classList.add("d-none");
-        if (localVideo) localVideo.classList.add("d-none");
         grid.classList.remove("d-none");
         grid.setAttribute("aria-hidden", "false");
         grid.className = "wc-call-video-grid tiles-" + Math.min(tiles.length, 4);
@@ -614,6 +927,8 @@
                 v.autoplay = true;
                 v.playsInline = true;
                 v.muted = true;
+                v.setAttribute("playsinline", "true");
+                v.setAttribute("webkit-playsinline", "true");
                 if (tile.legId) v.setAttribute("data-leg", String(tile.legId));
                 else v.setAttribute("data-tile-video", "local");
                 wrap.appendChild(v);
@@ -622,17 +937,14 @@
                 wrap.appendChild(lab);
                 grid.appendChild(wrap);
             }
+            wrap.setAttribute("data-speaker-key", tile.speakerKey || tile.key);
             var videoEl = wrap.querySelector("video");
             var labelEl = wrap.querySelector(".wc-call-tile-label");
             if (labelEl) labelEl.textContent = tile.label || "";
             if (videoEl && tile.stream && videoEl.srcObject !== tile.stream) {
                 videoEl.srcObject = tile.stream;
             }
-            if (videoEl) {
-                videoEl.muted = true;
-                var p = videoEl.play();
-                if (p && typeof p.catch === "function") p.catch(function () {});
-            }
+            prepVideoEl(videoEl, { muted: true, mirror: !!tile.mirror });
         });
 
         Object.keys(existing).forEach(function (key) {
@@ -642,6 +954,8 @@
         });
 
         rebuildHostVideoMix();
+        refreshSpeakerBindings();
+        applySpeakerUi(activeSpeakerKey);
     }
 
     function attachRemoteTrack(track) {
@@ -652,18 +966,26 @@
         if (remoteAudio) remoteAudio.srcObject = remoteStream;
         if (!(multiMode && callType === "video")) {
             if (remoteVideo) remoteVideo.srcObject = remoteStream;
+            prepVideoEl(remoteVideo, { muted: callType !== "video", mirror: false });
         }
         playRemoteMedia();
         syncMultiVideoGrid();
+        refreshSpeakerBindings();
     }
 
     function showLocalPreview(stream) {
         if (!localVideo || !stream) return;
+        // On multi-grid phones, only the grid tile owns the stream (Safari dual-play bug)
+        if (videoArea && videoArea.classList.contains("is-multi-grid")) {
+            localVideo.srcObject = null;
+            localVideo.classList.add("d-none");
+            syncMultiVideoGrid();
+            return;
+        }
         localVideo.srcObject = stream;
-        localVideo.muted = true;
-        localVideo.setAttribute("playsinline", "true");
-        localVideo.play().catch(function () {});
+        prepVideoEl(localVideo, { muted: true, mirror: true });
         syncMultiVideoGrid();
+        bindSpeakerStream("local", stream);
     }
 
     function closeMultiLegs() {
@@ -686,6 +1008,7 @@
         stopCallTimer();
         stopTimers();
         accepting = false;
+        startingMulti = false;
         closeMultiLegs();
         if (pc) {
             pc.onicecandidate = null;
@@ -695,6 +1018,12 @@
             pc = null;
         }
         if (localStream) {
+            try {
+                if (localStream._wcOsc) localStream._wcOsc.stop();
+            } catch (e) {}
+            try {
+                if (localStream._wcAudioCtx) localStream._wcAudioCtx.close();
+            } catch (e) {}
             localStream.getTracks().forEach(function (t) { t.stop(); });
             localStream = null;
         }
@@ -713,6 +1042,7 @@
         }
         stopHostVideoMix();
         clearMultiVideoGrid();
+        stopSpeakerDetect();
         lastAudioMixKey = "";
         groupPeersCache = [];
         activeCallId = null;
@@ -780,49 +1110,147 @@
         }
     }
 
+    function createSilentAudioStream() {
+        var stream = new MediaStream();
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return stream;
+        try {
+            var ctx = new AC();
+            if (ctx.state === "suspended") {
+                ctx.resume().catch(function () {});
+            }
+            var osc = ctx.createOscillator();
+            var gain = ctx.createGain();
+            var dest = ctx.createMediaStreamDestination();
+            gain.gain.value = 0.0001;
+            osc.connect(gain);
+            gain.connect(dest);
+            osc.start();
+            dest.stream.getAudioTracks().forEach(function (t) {
+                t.enabled = true;
+                try { t.contentHint = "music"; } catch (e) {}
+                stream.addTrack(t);
+            });
+            stream._wcSilent = true;
+            stream._wcAudioCtx = ctx;
+            stream._wcOsc = osc;
+        } catch (e) {}
+        return stream;
+    }
+
     async function getMedia(type, opts) {
         opts = opts || {};
-        var audioConstraints = {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-        };
+        var wantVideo = type === "video";
+        var groupCtx = isGroupCallContext(opts);
 
-        if (type !== "video") {
-            return navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+        async function tryGum(constraints) {
+            return navigator.mediaDevices.getUserMedia(constraints);
         }
 
-        var videoTries = [
-            {
-                facingMode: "user",
-                width: { ideal: 320, max: 480 },
-                height: { ideal: 240, max: 360 },
-                frameRate: { ideal: 15, max: 20 }
-            },
-            { facingMode: "user", width: { ideal: 320 }, height: { ideal: 240 } },
-            { facingMode: "user", frameRate: { ideal: 15 } }
-        ];
-
-        var lastErr = null;
-        for (var i = 0; i < videoTries.length; i++) {
-            try {
-                return await navigator.mediaDevices.getUserMedia({
-                    audio: audioConstraints,
-                    video: videoTries[i]
-                });
-            } catch (err) {
-                lastErr = err;
+        async function acquire() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throwMediaError({ name: "NotSupportedError", message: "getUserMedia unsupported" });
             }
+
+            var lastErr = null;
+            var audioTries = [
+                true,
+                { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                { echoCancellation: true }
+            ];
+
+            if (!wantVideo) {
+                for (var a = 0; a < audioTries.length; a++) {
+                    try {
+                        return await tryGum({ audio: audioTries[a], video: false });
+                    } catch (err) {
+                        lastErr = err;
+                    }
+                }
+                // Group: join receive-only with silent track so the call can still connect
+                if (groupCtx || opts.allowSilent) {
+                    var silentVoice = createSilentAudioStream();
+                    if (silentVoice.getAudioTracks().length) {
+                        muted = true;
+                        updateMuteBtn();
+                        return silentVoice;
+                    }
+                }
+                throwMediaError(lastErr || { name: "NotFoundError", message: "Requested device not found" });
+            }
+
+            // Video: try simple combos first (facingMode often breaks desktop cams)
+            var videoTries = isPhoneDevice() || isIOSDevice()
+                ? [
+                    { audio: true, video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } } },
+                    { audio: true, video: { facingMode: "user" } },
+                    { audio: true, video: true },
+                    { audio: true, video: { facingMode: { ideal: "user" } } }
+                ]
+                : [
+                    { audio: true, video: true },
+                    { audio: true, video: { width: { ideal: 640 }, height: { ideal: 360 } } },
+                    { audio: true, video: { facingMode: "user" } },
+                    { audio: { echoCancellation: true }, video: true }
+                ];
+            for (var v = 0; v < videoTries.length; v++) {
+                try {
+                    return await tryGum(videoTries[v]);
+                } catch (err) {
+                    lastErr = err;
+                }
+            }
+
+            // Camera failed — continue with mic only
+            for (var a2 = 0; a2 < audioTries.length; a2++) {
+                try {
+                    var audioOnly = await tryGum({ audio: audioTries[a2], video: false });
+                    if (!opts.silentFallback && !groupCtx && !opts.quiet && WC.toast) {
+                        WC.toast("Camera unavailable — continuing with audio only.", "warning");
+                    }
+                    return audioOnly;
+                } catch (err2) {
+                    lastErr = err2;
+                }
+            }
+
+            if (groupCtx || opts.allowSilent) {
+                var silentVideo = createSilentAudioStream();
+                if (silentVideo.getAudioTracks().length) {
+                    muted = true;
+                    updateMuteBtn();
+                    return silentVideo;
+                }
+            }
+            throwMediaError(lastErr || { name: "NotFoundError", message: "Requested device not found" });
         }
 
-        // Last resort: audio only so call can still connect
-        try {
-            if (!opts.quiet && WC.toast) {
-                WC.toast("Camera unavailable — continuing with audio only.", "warning");
-            }
-            return await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
-        } catch (err2) {
-            throw lastErr || err2;
+        // Serialize getUserMedia so group preview/accept/start share one attempt
+        if (mediaAcquirePromise) {
+            return mediaAcquirePromise;
+        }
+
+        mediaAcquirePromise = acquire().finally(function () {
+            mediaAcquirePromise = null;
+        });
+        return mediaAcquirePromise;
+    }
+
+    function addTracksOrTransceivers(peerConnection, stream, wantVideo) {
+        if (!peerConnection) return;
+        var hasAudio = stream && stream.getAudioTracks().length > 0;
+        var hasVideo = stream && stream.getVideoTracks().length > 0;
+        if (stream) {
+            stream.getTracks().forEach(function (track) {
+                try { peerConnection.addTrack(track, stream); } catch (e) {}
+            });
+        }
+        // Ensure SDP always negotiates audio (and video for video calls) so peers can connect
+        if (!hasAudio) {
+            try { peerConnection.addTransceiver("audio", { direction: "sendrecv" }); } catch (e) {}
+        }
+        if (wantVideo && !hasVideo) {
+            try { peerConnection.addTransceiver("video", { direction: "recvonly" }); } catch (e) {}
         }
     }
 
@@ -885,22 +1313,17 @@
     }
 
     async function addLocalTracks(stream) {
-        if (!pc || !stream) return;
-        stream.getTracks().forEach(function (track) {
-            var exists = pc.getSenders().some(function (s) {
-                return s.track && s.track.id === track.id;
-            });
-            if (!exists) {
+        if (!pc) return;
+        addTracksOrTransceivers(pc, stream, callType === "video");
+        if (stream) {
+            stream.getTracks().forEach(function (track) {
                 try {
-                    pc.addTrack(track, stream);
+                    if (track.kind === "video") track.contentHint = "motion";
+                    else if (track.kind === "audio") track.contentHint = "speech";
                 } catch (e) {}
-            }
-            try {
-                if (track.kind === "video") track.contentHint = "motion";
-                else if (track.kind === "audio") track.contentHint = "speech";
-            } catch (e) {}
-        });
-        showLocalPreview(stream);
+            });
+            showLocalPreview(stream);
+        }
         try {
             pc.getSenders().forEach(function (sender) {
                 if (!sender.track) return;
@@ -1044,7 +1467,7 @@
             startRingtone("outgoing");
             startPolling();
         } catch (e) {
-            WC.toast((e && e.message) ? e.message : "Unable to start call.", "error");
+            toastCallError(e, "Unable to start call.");
             endCallLocal();
         }
     }
@@ -1062,14 +1485,32 @@
 
         try {
             if (!localStream) {
-                localStream = await getMedia(call.call_type);
+                localStream = await getMedia(call.call_type, {
+                    group: !!call.group_id,
+                    call: call,
+                    allowSilent: !!call.group_id
+                });
             } else if (call.call_type === "video" && localStream.getVideoTracks().length === 0) {
-                // Upgrade preview audio-only to video if possible
+                // Upgrade preview audio-only to video if possible (quiet for group)
                 try {
-                    var upgraded = await getMedia("video");
-                    localStream.getTracks().forEach(function (t) { t.stop(); });
-                    localStream = upgraded;
+                    var upgraded = await getMedia("video", {
+                        group: !!call.group_id,
+                        call: call,
+                        quiet: !!call.group_id,
+                        allowSilent: !!call.group_id
+                    });
+                    if (upgraded && upgraded !== localStream) {
+                        localStream.getTracks().forEach(function (t) { t.stop(); });
+                        localStream = upgraded;
+                    }
                 } catch (e) {}
+            }
+            if (!localStream || !localStream.getTracks().length) {
+                if (call.group_id) {
+                    localStream = createSilentAudioStream();
+                } else {
+                    throw new Error("Microphone required for calls.");
+                }
             }
 
             createPeer(call.call_type === "video");
@@ -1123,8 +1564,7 @@
             accepting = false;
         } catch (e) {
             accepting = false;
-            var msg = (e && e.message) ? e.message : "Unable to accept call.";
-            if (WC.toast) WC.toast(msg, "error");
+            toastCallError(e, "Unable to accept call.", { group: !!(call && call.group_id) });
             try {
                 await WC.api("calls.php?action=reject", {
                     method: "POST",
@@ -1261,7 +1701,13 @@
             return;
         }
         try {
-            localStream = await getMedia("video", { quiet: true });
+            localStream = await getMedia("video", {
+                quiet: true,
+                silentFallback: true,
+                allowSilent: true,
+                group: !!call.group_id,
+                call: call
+            });
             showLocalPreview(localStream);
         } catch (e) {
             // Preview is optional; accept can retry
@@ -1395,12 +1841,23 @@
         });
         var allPeers = [];
         if (WC.userAvatar || WC.userName) {
-            allPeers.push({ username: WC.userName || "You", avatar: WC.userAvatar || "", connected: connected > 0 });
+            allPeers.push({
+                username: WC.userName || "You",
+                avatar: WC.userAvatar || "",
+                connected: connected > 0,
+                id: WC.userId,
+                isSelf: true,
+                _speakerKey: "local"
+            });
         }
         ids.forEach(function (id) {
             var leg = multiLegs[id];
             if (!leg || leg.ended || !leg.peer) return;
-            allPeers.push(Object.assign({}, leg.peer, { connected: !!leg.connected }));
+            allPeers.push(Object.assign({}, leg.peer, {
+                connected: !!leg.connected,
+                id: leg.userId || leg.peer.id,
+                _speakerKey: leg.userId ? ("user-" + leg.userId) : ("leg-" + id)
+            }));
         });
         if (allPeers.length) groupPeersCache = allPeers;
 
@@ -1416,6 +1873,7 @@
             applyGroupPeersUi(allPeers, { people: totalPeople });
             rebuildHostAudioMix();
             syncMultiVideoGrid();
+            refreshSpeakerBindings();
         } else if (ringing > 0) {
             setStatus("Ringing " + ringing + " member" + (ringing > 1 ? "s" : "") + "...");
             if (allPeers.length) {
@@ -1438,6 +1896,9 @@
     }
 
     async function addMultiLeg(userId, type) {
+        if (!localStream || !localStream.getTracks().length) {
+            localStream = createSilentAudioStream();
+        }
         var cfg = WC.rtcConfig || { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
         var legPc = new RTCPeerConnection(cfg);
         var leg = {
@@ -1453,8 +1914,12 @@
         };
 
         localStream.getTracks().forEach(function (track) {
-            try { legPc.addTrack(track, localStream); } catch (e) {}
+            try {
+                if (track.kind === "video") track.contentHint = "motion";
+                else if (track.kind === "audio") track.contentHint = "speech";
+            } catch (e) {}
         });
+        addTracksOrTransceivers(legPc, localStream, type === "video");
 
         legPc.ontrack = function (ev) {
             if (ev.streams && ev.streams[0]) {
@@ -1631,7 +2096,7 @@
         if (ids.length === 1 && !(groupId && parseInt(groupId, 10))) {
             return startCall(ids[0], type);
         }
-        if (activeCallId || accepting || multiMode) {
+        if (activeCallId || accepting || multiMode || startingMulti) {
             if (WC.toast) WC.toast("You already have an active call.", "warning");
             return;
         }
@@ -1640,6 +2105,7 @@
             return;
         }
 
+        startingMulti = true;
         try {
             multiMode = true;
             multiLegs = {};
@@ -1647,7 +2113,10 @@
             callBatchKey = activeGroupId
                 ? ("g" + activeGroupId + "_" + Date.now() + "_" + (WC.userId || 0))
                 : ("m_" + Date.now() + "_" + (WC.userId || 0));
-            localStream = await getMedia(type);
+            localStream = await getMedia(type, { group: true, allowSilent: true });
+            if (!localStream || !localStream.getTracks().length) {
+                localStream = createSilentAudioStream();
+            }
             isCaller = true;
             callType = type;
             showOverlay(true);
@@ -1667,8 +2136,10 @@
             statusPollTimer = setInterval(pollMultiLegs, 700);
             pollMultiLegs();
             updateMultiStatus();
+            startingMulti = false;
         } catch (e) {
-            if (WC.toast) WC.toast((e && e.message) ? e.message : "Unable to start call.", "error");
+            startingMulti = false;
+            toastCallError(e, "Unable to start call.", { group: true });
             endCallLocal();
         }
     }
